@@ -1,16 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <unistd.h>
+#include <sys/types.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
+#include <sys/un.h>
+#include <pthread.h>
+
 
 #define MAX_CLIENTS 10
 #define MAX_MESSAGE_LENGTH 1024
 #define MAX_NAME_LENGTH 256
 
 pthread_t threads[MAX_CLIENTS];
+int clients_id[MAX_CLIENTS];
 int client_count = 0;
 
 // Matrice pour stocker les messages de chaque utilisateur
@@ -20,148 +23,128 @@ char messages[MAX_CLIENTS][MAX_MESSAGE_LENGTH];
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // Fonction pour ajouter un nouveau message à la matrice des messages
-void add_message(int client_id, char* message) {
+void ajout_message(int client_id, char* message) {
     pthread_mutex_lock(&mutex);
     strcpy(messages[client_id], message);
     pthread_mutex_unlock(&mutex);
 }
 
 // Fonction pour envoyer un message à tous les clients
-void broadcast(int sender_id, char* message) {
+void PropageMessage(int sender_id, char* message) {
     for (int i = 0; i < client_count; i++) {
-        if (i != sender_id) {
-            send(i, message, strlen(message), 0);
+        if (clients_id[i] != sender_id) {
+            write(clients_id[i], message, strlen(message));
         }
     }
 }
 
 // Fonction pour traiter les messages reçus des clients
-void* handle_client(void* arg) {
+void* gereClient(void* arg) 
+{
     int client_id = *(int*)arg;
-    free(arg);
 
     // Envoie d'un message de bienvenue au client
     char welcome_message[MAX_MESSAGE_LENGTH];
-    sprintf(welcome_message, "Bienvenue sur le chat ! Vous êtes l'utilisateur n°%d.\n", client_id);
-    send(client_id, welcome_message, strlen(welcome_message), 0);
+    sprintf(welcome_message, "Bienvenue sur le chat ! Vous êtes l'utilisateur n°%d.\n", client_id-3);
+    if (send(client_id, welcome_message, strlen(welcome_message), 0)<0)
+    {
+        printf("Impossible d'envoyer le message de bienvenue.\n");
+    }
 
     // Boucle pour recevoir les messages du client
     char message[MAX_MESSAGE_LENGTH];
-    while (recv(client_id, message, MAX_MESSAGE_LENGTH, 0) > 0) {
+    while (read(client_id, message, MAX_MESSAGE_LENGTH) > 0) 
+    {
         // Ajout du message à la matrice des messages
-        add_message(client_id, message);
+        ajout_message(client_id, message);
+
+        printf("Un mesage :%s\n",message);
 
         // Envoie du message à tous les clients
-        char broadcast_message[MAX_MESSAGE_LENGTH + MAX_NAME_LENGTH];
-        sprintf(broadcast_message, "Utilisateur n°%d : %s", client_id, message);
-        broadcast(client_id, broadcast_message);
+        char PropageMessage_message[MAX_MESSAGE_LENGTH + MAX_NAME_LENGTH];
+        sprintf(PropageMessage_message, "user n°%d : %s", client_id-3, message);
+        PropageMessage(client_id, PropageMessage_message);
+        // Reinitialiser le message
+        memset(message, 0, MAX_MESSAGE_LENGTH);
+    }
 
-        // Vérifier si le message est un message de commande
-        if (message[0] == '/') {
-            // Extraire la commande et les arguments
-            char command[MAX_MESSAGE_LENGTH];
-            char argument[MAX_MESSAGE_LENGTH];
-            sscanf(message, "/%s %[^\n]", command, argument);
+    // Si le client ferme la connexion, supprimer le client de la liste des clients connectés
+    pthread_mutex_lock(&mutex);
+    for (int i = client_id-4; i < client_count - 1; i++) 
+    {
+        clients_id[i] = clients_id[i + 1];
+        memset(messages[i], 0, MAX_MESSAGE_LENGTH);
+        strcpy(messages[i], messages[i + 1]);
+    }
+    client_count--;
+    pthread_mutex_unlock(&mutex);
 
-            // Gestion de la commande /quit
-            if (strcmp(command, "quit") == 0) {
-                // Envoyer un message de déconnexion au client
-                char quit_message[MAX_MESSAGE_LENGTH];
-                sprintf(quit_message, "Vous avez été déconnecté.\n");
-                send(client_id, quit_message, strlen(quit_message), 0);
+    // Fermer la connexion
+    close(client_id);
+    pthread_exit(NULL);
+}
 
-                // Supprimer le client de la liste des clients connectés
-                pthread_mutex_lock(&mutex);
-                for (int i = client_id; i < client_count - 1; i++) {
-                    threads[i] = threads[i + 1];
-                    memset(messages[i], 0, MAX_MESSAGE_LENGTH);
-                    strcpy(messages[i], messages[i + 1]);
-                }
-                client_count--;
-                pthread_mutex_unlock(&mutex);
-            // Fermer la connexion
-            close(client_id);
-            return NULL;
+int main(int argc, char** argv) 
+{
+    int secoute, sservice;
+    struct sockaddr_un saddr = {0};
+    saddr.sun_family=AF_UNIX;//saddr family unix
+    strcpy(saddr.sun_path,"./MyStock");
+    socklen_t addrlen = sizeof(saddr);
+     
+    // Création de la socket serveur
+    if ((secoute = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) 
+    {
+        perror("socket failed");
+        exit(EXIT_FAILURE);
+    }
+
+    unlink("./MyStock");
+
+    if (bind(secoute, (struct sockaddr *)&saddr, addrlen) == -1) 
+    {
+        perror("bind failed");
+        exit(EXIT_FAILURE);
+    }
+
+    // Écoute sur la socket serveur
+    if (listen(secoute, 6) == -1) {   //6 : longeur maxmal  de la file d'atente
+        perror("listen");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Le serveur est en attente de connexions entrantes...\n");
+
+    // Boucle principale de gestion des connexions
+    while (1) {
+        // Acceptation d'une connexion entrante
+        struct sockaddr_un client_addr = {0};
+        socklen_t client_addr_len = sizeof(client_addr);
+        sservice = accept(secoute, (struct sockaddr*)&client_addr, &client_addr_len);
+        if (sservice == -1) 
+        {
+            perror("Erreur lors de l'acceptation de la connexion entrante");
+            return 1;
         }
+
+        printf("Connexion acceptée\n");
+
+        // Allocation d'un identifiant unique pour le client
+        clients_id[client_count]=sservice;
+
+        // Création d'un nouveau thread pour le client
+        if (pthread_create(&threads[client_count], NULL, gereClient, &sservice) != 0) {
+            perror("Erreur lors de la création du thread client");
+            return 1;
+        }
+
+        // Incrémentation du compteur de clients
+        client_count++;
     }
 
-    // Réinitialiser le message
-    memset(message, 0, MAX_MESSAGE_LENGTH);
+    // Fermeture de la socket serveur
+    close(secoute);
+
+    return 0;
 }
 
-// Si le client ferme la connexion, supprimer le client de la liste des clients connectés
-pthread_mutex_lock(&mutex);
-for (int i = client_id; i < client_count - 1; i++) {
-    threads[i] = threads[i + 1];
-    memset(messages[i], 0, MAX_MESSAGE_LENGTH);
-    strcpy(messages[i], messages[i + 1]);
-}
-client_count--;
-pthread_mutex_unlock(&mutex);
-
-// Fermer la connexion
-close(client_id);
-return NULL;
-}
-
-int main(int argc, char** argv) {
-    if (argc < 2) {
-    printf("Utilisation : %s port\n", argv[0]);
-    return 1;
-    }
-
-    int port = atoi(argv[1]);
-
-// Initialiser le socket
-int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-
-// Configuration du socket
-struct sockaddr_in server_address;
-server_address.sin_family = AF_INET;
-server_address.sin_addr.s_addr = INADDR_ANY;
-server_address.sin_port = htons(port);
-
-// Lier le socket à l'adresse locale
-bind(server_fd, (struct sockaddr*)&server_address, sizeof(server_address));
-
-// Ecouter les connexions entrantes
-listen(server_fd, MAX_CLIENTS);
-
-printf("Serveur en écoute sur le port %d...\n", port);
-
-// Boucle principale pour accepter les connexions entrantes
-while (1) {
-    // Accepter la connexion entrante
-    struct sockaddr_in client_address;
-    socklen_t client_address_len = sizeof(client_address);
-    int client_fd = accept(server_fd, (struct sockaddr*)&client_address, &client_address_len);
-    if(client_fd<0)
-    {
-        printf("Ereur d'acceptation");
-    }
-
-    // Vérifier si le nombre maximum de clients est atteint
-    if (client_count >= MAX_CLIENTS) {
-        printf("Nombre maximum de clients atteint. Connexion refusée.\n");
-        close(client_fd);
-        continue;
-    }
-
-    // Ajouter le nouveau client à la liste des clients connectés
-    int* client_id_ptr = malloc(sizeof(int));
-    *client_id_ptr = client_count;
-    if(pthread_create(&threads[client_count], NULL, handle_client, (void*)client_id_ptr)<0)
-    {
-        printf("Erreur d'ajout");
-    }
-    client_count++;
-
-    printf("Nouvelle connexion : %s:%d (utilisateur n°%d)\n", inet_ntoa(client_address.sin_addr), ntohs(client_address.sin_port), *client_id_ptr);
-}
-
-// Fermer le socket du serveur
-close(server_fd);
-
-return 0;
-
-}
